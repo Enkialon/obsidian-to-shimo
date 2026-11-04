@@ -25,10 +25,10 @@ export async function syncActiveNote(ctx: SyncContext): Promise<void> {
 
 /**
  * 行为完全由 frontmatter 的 shimo 指向决定：
- * - 指向文件夹 → 上传 md 到该文件夹（不转换，不动原文档）
+ * - 指向文件夹 → 上传并转换为石墨原生文档，回写 frontmatter 到新文档
  * - 指向文档 → 转换覆盖（生成新文档、删除旧的、回写 frontmatter）
  *
- * 两条路径都会先上传本地图片，把链接写进正文，再上传/转换。
+ * 两条路径都会先上传本地图片，把链接写进正文，再转换。
  */
 export async function syncNote(ctx: SyncContext, file: TFile): Promise<void> {
   const log = new SyncLogger();
@@ -168,7 +168,10 @@ async function syncAsConvert(
   );
 }
 
-/** 目标是指向文件夹：上传 md（含已改写的远程图片链接） */
+/**
+ * 目标是指向文件夹：上传 md → editImport 转成石墨原生文档，并回写 shimo。
+ * 之后这篇笔记会变成「文档覆盖」路径，不会在文件夹里堆 md 副本。
+ */
 async function syncToFolder(
   ctx: SyncContext,
   log: SyncLogger,
@@ -178,7 +181,7 @@ async function syncToFolder(
 ): Promise<void> {
   const { file, body, title, meta, folderGuid, folderName } = job;
 
-  log.step("上传到文件夹", { folderGuid, folderName, title });
+  log.step("上传到文件夹并转换", { folderGuid, folderName, title });
 
   const processed = await prepareBodyWithAttachments(ctx, log, client, {
     file,
@@ -187,15 +190,19 @@ async function syncToFolder(
     hostGuid: folderGuid,
   });
 
-  const created = await client.uploadMarkdownFile(processed.markdown, {
+  const created = await client.uploadMarkdownDocument(processed.markdown, {
     filename: `${title}.md`,
     folderGuid,
   });
-  log.step("已上传 Markdown 文件", created);
+  log.step("已生成石墨文档", created);
+
+  await updateFrontmatterShimoUrl(ctx.app, file, created.url);
+  log.step("已回写 frontmatter", { shimo: created.url });
 
   notice.hide();
   new Notice(
-    `已上传「${created.name}」到文件夹「${folderName || folderGuid}」；${formatAssetNotice(processed)}`,
+    `已在文件夹「${folderName || folderGuid}」生成石墨文档「${created.name}」` +
+      `；frontmatter 已更新；${formatAssetNotice(processed)}`,
   );
 }
 

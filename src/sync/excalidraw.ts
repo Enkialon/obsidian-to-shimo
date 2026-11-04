@@ -19,6 +19,10 @@ type ExcalidrawAutomateLike = {
   isExcalidrawFile?: (f: TFile) => boolean;
   getSceneFromFile: (file: TFile) => Promise<{ elements: unknown[]; appState?: unknown }>;
   copyViewElementsToEAforEditing: (elements: unknown[], copyImages?: boolean) => void;
+  getExportSettings?: (
+    withBackground: boolean,
+    withTheme: boolean,
+  ) => { withBackground: boolean; withTheme: boolean; isMask?: boolean };
   createPNG: (
     templatePath?: string,
     scale?: number,
@@ -36,6 +40,18 @@ type ExcalidrawAutomateLike = {
     padding?: number,
   ) => Promise<string | { dataURL?: string; base64?: string } | unknown>;
 };
+
+/** 白底 + 浅色主题，避免透明 PNG 在石墨里看起来像「空白图」 */
+function buildExportSettings(ea: ExcalidrawAutomateLike): unknown {
+  if (typeof ea.getExportSettings === "function") {
+    try {
+      return ea.getExportSettings(true, true);
+    } catch {
+      // fall through
+    }
+  }
+  return { withBackground: true, withTheme: true, isMask: false };
+}
 
 function getGlobalEA(): ExcalidrawAutomateLike | null {
   const w = window as unknown as {
@@ -90,11 +106,12 @@ export async function renderExcalidrawFile(
 
     ea.copyViewElementsToEAforEditing(scene.elements, true);
 
+    const exportSettings = buildExportSettings(ea);
     let bytes: ArrayBuffer | null = null;
     let lastError = "";
 
     try {
-      const png = await ea.createPNG(undefined, pngScale);
+      const png = await ea.createPNG(undefined, pngScale, exportSettings, undefined, "light");
       bytes = await coerceToArrayBuffer(png);
     } catch (err) {
       lastError = err instanceof Error ? err.message : String(err);
@@ -102,7 +119,7 @@ export async function renderExcalidrawFile(
 
     if (!bytes && ea.createPNGBase64) {
       try {
-        const b64 = await ea.createPNGBase64(undefined, pngScale);
+        const b64 = await ea.createPNGBase64(undefined, pngScale, exportSettings, undefined, "light");
         bytes = await coerceToArrayBuffer(b64);
       } catch (err) {
         lastError = err instanceof Error ? err.message : String(err);
@@ -114,6 +131,13 @@ export async function renderExcalidrawFile(
         image: null,
         error: lastError || "createPNG 未能得到有效图片数据",
       };
+    }
+
+    // 再压一层白底，防止个别版本仍导出透明背景
+    try {
+      bytes = await flattenPngOntoWhite(bytes);
+    } catch {
+      // 压平失败仍用原图
     }
 
     const stem = file.basename.replace(/\.excalidraw$/i, "") || "excalidraw";
@@ -135,6 +159,36 @@ export async function renderExcalidrawFile(
     } catch {
       // ignore
     }
+  }
+}
+
+/** 把透明 PNG 合成到白底上，避免石墨预览「点开才有图」 */
+async function flattenPngOntoWhite(pngBytes: ArrayBuffer): Promise<ArrayBuffer> {
+  const blob = new Blob([pngBytes], { type: "image/png" });
+  const url = URL.createObjectURL(blob);
+  try {
+    const img = await new Promise<HTMLImageElement>((resolve, reject) => {
+      const el = new Image();
+      el.onload = () => resolve(el);
+      el.onerror = () => reject(new Error("PNG 解码失败"));
+      el.src = url;
+    });
+    const width = Math.max(1, img.naturalWidth || img.width);
+    const height = Math.max(1, img.naturalHeight || img.height);
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) throw new Error("Canvas 2D unavailable");
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, width, height);
+    ctx.drawImage(img, 0, 0, width, height);
+    const out = await new Promise<Blob>((resolve, reject) => {
+      canvas.toBlob((b) => (b ? resolve(b) : reject(new Error("toBlob 失败"))), "image/png");
+    });
+    return out.arrayBuffer();
+  } finally {
+    URL.revokeObjectURL(url);
   }
 }
 

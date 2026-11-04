@@ -81,9 +81,8 @@ export class ObsidianToShimoSettingTab extends PluginSettingTab {
       cls: "ots-hint",
       text:
         "无需配置方式：看笔记 frontmatter 的 shimo 指向哪。" +
-        "指向文件夹（https://shimo.im/folder/xxx）→ 把 md 上传进该文件夹，不转换、不动原文档；" +
-        "指向文档（https://shimo.im/docs/xxx）→ 上传并转换为石墨原生文档（保留标题/列表/表格排版），" +
-        "成功后删除旧文档，并把 shimo 改写为新文档地址。",
+        "指向文件夹（https://shimo.im/folder/xxx）→ 上传并转换为石墨原生文档，回写 shimo 到新文档；" +
+        "指向文档（https://shimo.im/docs/xxx）→ 转换覆盖：生成新文档、删除旧的、回写 shimo。",
     });
 
     containerEl.createEl("h3", { text: "如何获取 shimo_sid" });

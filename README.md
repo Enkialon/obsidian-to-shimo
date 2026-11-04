@@ -16,7 +16,7 @@
 | 能力 | 说明 |
 |------|------|
 | 元数据绑定 | frontmatter `shimo` 指向文档或文件夹 |
-| 自动分流 | 文件夹 → 上传 md；文档 → 转换覆盖 |
+| 自动分流 | 文件夹 → 转原生文档并回写；文档 → 转换覆盖 |
 | 附件复用 | 按内容 SHA-256 映射远程 URL |
 | 配置页鉴权 | 粘贴 `shimo_sid`，校验 `/users/me` |
 
@@ -46,12 +46,12 @@ npm run build
 `shimo` 指向什么，决定行为——**无需额外配置**：
 
 ```yaml
-# 文件夹 → 上传 md（不转换）
+# 文件夹 → 上传并转成石墨原生文档，回写 shimo 到新文档
 ---
 shimo: https://shimo.im/folder/47kgMDvBPduxba3V
 ---
 
-# 文档 → 转换覆盖（保留 Markdown 排版）
+# 文档 → 转换覆盖（删旧、回写新地址）
 ---
 shimo: https://shimo.im/docs/xxxxxxxx
 ---
@@ -66,7 +66,13 @@ shimo_sync_attachments: true
 
 ### 4. 上传
 
-功能区图标或命令「上传到石墨」：
+入口（任选）：
+
+- 左侧功能区上传图标
+- 命令面板「上传到石墨」
+- 文件右键 / 编辑器右键 →「上传到石墨」
+
+流程：
 
 1. `GET /files/{guid}` 判断文件夹 / 文档
 2. 处理附件（文件夹模式跳过）
@@ -77,8 +83,8 @@ shimo_sync_attachments: true
 
 | 目标 | 判定 | 行为 |
 |------|------|------|
-| 文件夹 | `isFolder` / `url` 以 `/folder/` 开头 | `postPolicy` 上传 `.md` 云文件 |
-| 文档 | 其它 | 上传 → `editImport` 转原生文档 → 删旧 → 回写 frontmatter |
+| 文件夹 | `isFolder` / `url` 以 `/folder/` 开头 | 上传 → `editImport` 转原生文档 → 回写 frontmatter |
+| 文档 | 其它 | 上传 → `editImport` → 删旧文档 → 回写 frontmatter |
 
 转换落在旧文档同级目录（`/panda-api/.../ancestors` 推导），并轮询 progress，最长 120 秒。
 
@@ -140,7 +146,6 @@ src/
 
 ## 已知限制
 
-- 文件夹模式同名不覆盖，重复上传会堆出多个同名 md
 - 非图片附件暂不支持（个人版仅 images 桶）
 - 个人版接口可能随官网变更
 

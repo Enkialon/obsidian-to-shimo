@@ -1,8 +1,9 @@
 import { Notice, Plugin, TFile } from "obsidian";
 import { AssetMap, DEFAULT_SETTINGS, ObsidianToShimoSettings, PluginData } from "./settings";
 import { ObsidianToShimoSettingTab } from "./settings-tab";
-import { getActiveShimoMeta, noteHasShimoTarget } from "./sync/frontmatter";
-import { canUpload, syncActiveNote } from "./sync/sync-service";
+import { isExcalidrawPath } from "./sync/excalidraw";
+import { getActiveShimoMeta, noteHasShimoTarget, readShimoMeta } from "./sync/frontmatter";
+import { canUpload, syncActiveNote, syncNote } from "./sync/sync-service";
 
 export default class ObsidianToShimoPlugin extends Plugin {
   settings: ObsidianToShimoSettings = { ...DEFAULT_SETTINGS };
@@ -13,13 +14,11 @@ export default class ObsidianToShimoPlugin extends Plugin {
   async onload(): Promise<void> {
     await this.loadPluginData();
 
-    // 左侧功能区始终显示入口；未配置时点击会提示原因（不隐藏按钮）
     this.ribbonEl = this.addRibbonIcon("upload", "上传到石墨", async () => {
       await this.tryUpload();
     });
     this.refreshRibbonState();
 
-    // 一条命令：行为由 frontmatter 的 shimo 指向决定（文件夹=上传，文档=转换覆盖）
     this.addCommand({
       id: "upload-to-shimo",
       name: "上传到石墨",
@@ -27,6 +26,37 @@ export default class ObsidianToShimoPlugin extends Plugin {
         await this.tryUpload();
       },
     });
+
+    // 文件资源管理器右键 / 标签右键，与导出插件同级入口
+    this.registerEvent(
+      this.app.workspace.on("file-menu", (menu, file) => {
+        if (!(file instanceof TFile) || file.extension !== "md") return;
+        if (isExcalidrawPath(file.path)) return;
+
+        menu.addItem((item) => {
+          item
+            .setTitle("上传到石墨")
+            .setIcon("upload")
+            .onClick(() => {
+              void this.tryUploadFile(file);
+            });
+        });
+      }),
+    );
+
+    // 编辑器内右键菜单
+    this.registerEvent(
+      this.app.workspace.on("editor-menu", (menu) => {
+        menu.addItem((item) => {
+          item
+            .setTitle("上传到石墨")
+            .setIcon("upload")
+            .onClick(() => {
+              void this.tryUpload();
+            });
+        });
+      }),
+    );
 
     this.addSettingTab(new ObsidianToShimoSettingTab(this.app, this));
 
@@ -51,17 +81,36 @@ export default class ObsidianToShimoPlugin extends Plugin {
 
   private async tryUpload(): Promise<void> {
     const active = getActiveShimoMeta(this.app);
-    if (!canUpload(this.settings, active?.meta ?? null)) {
+    if (!this.ensureCanUpload(active?.meta ?? null, !!this.app.workspace.getActiveFile())) {
+      return;
+    }
+    await syncActiveNote(this.syncContext());
+  }
+
+  private async tryUploadFile(file: TFile): Promise<void> {
+    const cache = this.app.metadataCache.getFileCache(file);
+    const meta = readShimoMeta(cache?.frontmatter);
+    if (!this.ensureCanUpload(meta, true)) return;
+    await syncNote(this.syncContext(), file);
+  }
+
+  private ensureCanUpload(
+    meta: ReturnType<typeof readShimoMeta>,
+    hasFile: boolean,
+  ): boolean {
+    if (!canUpload(this.settings, meta)) {
       if (!this.settings.shimoSid.trim()) {
         new Notice("请先在设置 → Obsidian to Shimo 中配置 shimo_sid");
-      } else if (!active) {
+      } else if (!hasFile) {
+        new Notice("没有打开的笔记");
+      } else if (!meta) {
         new Notice("当前笔记未配置 shimo 地址（frontmatter 需要 shimo: 文档或文件夹 URL）");
       } else {
         new Notice("当前无法上传，请检查凭证与 shimo 地址");
       }
-      return;
+      return false;
     }
-    await syncActiveNote(this.syncContext());
+    return true;
   }
 
   private syncContext() {
@@ -81,7 +130,6 @@ export default class ObsidianToShimoPlugin extends Plugin {
     if (!this.ribbonEl) return;
     const target = file ?? this.app.workspace.getActiveFile();
     const enabled = noteHasShimoTarget(this.app, target) && !!this.settings.shimoSid.trim();
-    // 始终可见；未就绪时略微变淡，但不要藏起来
     this.ribbonEl.style.opacity = enabled ? "1" : "0.55";
     this.ribbonEl.style.display = "";
     this.ribbonEl.removeAttribute("aria-disabled");

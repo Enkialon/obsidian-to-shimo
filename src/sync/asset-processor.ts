@@ -179,7 +179,7 @@ async function resolveUploadableImage(
     if (attempt.image) {
       return {
         image: {
-          cacheKey: `${file.path}#ea-png`,
+          cacheKey: `${file.path}#ea-png-v2`,
           data: attempt.image.bytes,
           filename: attempt.image.filename,
           mime: attempt.image.mime,

@@ -110,8 +110,17 @@ export async function renderExcalidrawFile(
     let bytes: ArrayBuffer | null = null;
     let lastError = "";
 
+    // padding 尽量小，减少四周留白（石墨缩略预览常只看到左上角空白）
+    const padding = 16;
     try {
-      const png = await ea.createPNG(undefined, pngScale, exportSettings, undefined, "light");
+      const png = await ea.createPNG(
+        undefined,
+        pngScale,
+        exportSettings,
+        undefined,
+        "light",
+        padding,
+      );
       bytes = await coerceToArrayBuffer(png);
     } catch (err) {
       lastError = err instanceof Error ? err.message : String(err);
@@ -119,7 +128,14 @@ export async function renderExcalidrawFile(
 
     if (!bytes && ea.createPNGBase64) {
       try {
-        const b64 = await ea.createPNGBase64(undefined, pngScale, exportSettings, undefined, "light");
+        const b64 = await ea.createPNGBase64(
+          undefined,
+          pngScale,
+          exportSettings,
+          undefined,
+          "light",
+          padding,
+        );
         bytes = await coerceToArrayBuffer(b64);
       } catch (err) {
         lastError = err instanceof Error ? err.message : String(err);
@@ -133,11 +149,11 @@ export async function renderExcalidrawFile(
       };
     }
 
-    // 再压一层白底，防止个别版本仍导出透明背景
+    // 白底 + 裁掉近白/透明边距，避免石墨里预览「一片空白、点开才有图」
     try {
-      bytes = await flattenPngOntoWhite(bytes);
+      bytes = await flattenAndTrimPng(bytes);
     } catch {
-      // 压平失败仍用原图
+      // 后处理失败仍用原图
     }
 
     const stem = file.basename.replace(/\.excalidraw$/i, "") || "excalidraw";
@@ -162,34 +178,103 @@ export async function renderExcalidrawFile(
   }
 }
 
-/** 把透明 PNG 合成到白底上，避免石墨预览「点开才有图」 */
-async function flattenPngOntoWhite(pngBytes: ArrayBuffer): Promise<ArrayBuffer> {
+/**
+ * 白底压平后裁掉近白色边距，并限制最长边，方便石墨文档内联预览。
+ */
+async function flattenAndTrimPng(pngBytes: ArrayBuffer): Promise<ArrayBuffer> {
   const blob = new Blob([pngBytes], { type: "image/png" });
   const url = URL.createObjectURL(blob);
   try {
-    const img = await new Promise<HTMLImageElement>((resolve, reject) => {
-      const el = new Image();
-      el.onload = () => resolve(el);
-      el.onerror = () => reject(new Error("PNG 解码失败"));
-      el.src = url;
+    const img = await loadHtmlImage(url);
+    const srcW = Math.max(1, img.naturalWidth || img.width);
+    const srcH = Math.max(1, img.naturalHeight || img.height);
+
+    const src = document.createElement("canvas");
+    src.width = srcW;
+    src.height = srcH;
+    const sctx = src.getContext("2d", { willReadFrequently: true });
+    if (!sctx) throw new Error("Canvas 2D unavailable");
+    sctx.fillStyle = "#ffffff";
+    sctx.fillRect(0, 0, srcW, srcH);
+    sctx.drawImage(img, 0, 0, srcW, srcH);
+
+    const { data } = sctx.getImageData(0, 0, srcW, srcH);
+    const bounds = findContentBounds(data, srcW, srcH, 250);
+    const pad = 12;
+    const left = Math.max(0, bounds.left - pad);
+    const top = Math.max(0, bounds.top - pad);
+    const right = Math.min(srcW, bounds.right + pad);
+    const bottom = Math.min(srcH, bounds.bottom + pad);
+    const cropW = Math.max(1, right - left);
+    const cropH = Math.max(1, bottom - top);
+
+    // 最长边限制，避免石墨缩略图只截到空白边角
+    const maxEdge = 1600;
+    const scale = Math.min(1, maxEdge / Math.max(cropW, cropH));
+    const outW = Math.max(1, Math.round(cropW * scale));
+    const outH = Math.max(1, Math.round(cropH * scale));
+
+    const out = document.createElement("canvas");
+    out.width = outW;
+    out.height = outH;
+    const octx = out.getContext("2d");
+    if (!octx) throw new Error("Canvas 2D unavailable");
+    octx.fillStyle = "#ffffff";
+    octx.fillRect(0, 0, outW, outH);
+    octx.drawImage(src, left, top, cropW, cropH, 0, 0, outW, outH);
+
+    const outBlob = await new Promise<Blob>((resolve, reject) => {
+      out.toBlob((b) => (b ? resolve(b) : reject(new Error("toBlob 失败"))), "image/png");
     });
-    const width = Math.max(1, img.naturalWidth || img.width);
-    const height = Math.max(1, img.naturalHeight || img.height);
-    const canvas = document.createElement("canvas");
-    canvas.width = width;
-    canvas.height = height;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) throw new Error("Canvas 2D unavailable");
-    ctx.fillStyle = "#ffffff";
-    ctx.fillRect(0, 0, width, height);
-    ctx.drawImage(img, 0, 0, width, height);
-    const out = await new Promise<Blob>((resolve, reject) => {
-      canvas.toBlob((b) => (b ? resolve(b) : reject(new Error("toBlob 失败"))), "image/png");
-    });
-    return out.arrayBuffer();
+    return outBlob.arrayBuffer();
   } finally {
     URL.revokeObjectURL(url);
   }
+}
+
+function loadHtmlImage(url: string): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const el = new Image();
+    el.onload = () => resolve(el);
+    el.onerror = () => reject(new Error("PNG 解码失败"));
+    el.src = url;
+  });
+}
+
+/** 找非近白像素包围盒；threshold 越高越把浅灰当背景裁掉 */
+function findContentBounds(
+  rgba: Uint8ClampedArray,
+  width: number,
+  height: number,
+  threshold: number,
+): { left: number; top: number; right: number; bottom: number } {
+  let left = width;
+  let top = height;
+  let right = 0;
+  let bottom = 0;
+  let found = false;
+
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const i = (y * width + x) * 4;
+      const r = rgba[i];
+      const g = rgba[i + 1];
+      const b = rgba[i + 2];
+      const a = rgba[i + 3];
+      if (a < 8) continue;
+      if (r >= threshold && g >= threshold && b >= threshold) continue;
+      found = true;
+      if (x < left) left = x;
+      if (y < top) top = y;
+      if (x > right) right = x;
+      if (y > bottom) bottom = y;
+    }
+  }
+
+  if (!found) {
+    return { left: 0, top: 0, right: width, bottom: height };
+  }
+  return { left, top, right: right + 1, bottom: bottom + 1 };
 }
 
 /** 把 EA / vault 各种返回值收成可哈希、可上传的 ArrayBuffer */

@@ -21,10 +21,21 @@ export class AssetMapStore {
   }
 }
 
-/** 浏览器 / Electron 环境下对 ArrayBuffer 做 SHA-256 */
-export async function sha256Hex(data: ArrayBuffer): Promise<string> {
-  const digest = await crypto.subtle.digest("SHA-256", data);
+/** 浏览器 / Electron 环境下对二进制做 SHA-256（兼容 ArrayBuffer / TypedArray） */
+export async function sha256Hex(data: ArrayBuffer | ArrayBufferView): Promise<string> {
+  const buf = toDigestSource(data);
+  const digest = await crypto.subtle.digest("SHA-256", buf);
   return Array.from(new Uint8Array(digest))
     .map((b) => b.toString(16).padStart(2, "0"))
     .join("");
+}
+
+function toDigestSource(data: ArrayBuffer | ArrayBufferView): ArrayBuffer {
+  if (data instanceof ArrayBuffer) return data;
+  if (ArrayBuffer.isView(data)) {
+    return data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
+  }
+  throw new Error(
+    `sha256Hex 需要 ArrayBuffer，实际是 ${Object.prototype.toString.call(data)}`,
+  );
 }

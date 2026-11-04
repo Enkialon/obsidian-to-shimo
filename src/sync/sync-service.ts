@@ -1,7 +1,7 @@
 import { App, Notice, TFile } from "obsidian";
 import { ShimoApiError, ShimoClient, parseShimoGuid } from "../shimo";
 import { AssetMapStore } from "./asset-map";
-import { processAttachments } from "./asset-processor";
+import { AssetProcessResult, excalidrawStatusNote, processAttachments } from "./asset-processor";
 import { NoteShimoMeta, readShimoMeta } from "./frontmatter";
 import { AssetMap, ObsidianToShimoSettings } from "../settings";
 import { SyncLogger } from "./logger";
@@ -27,6 +27,8 @@ export async function syncActiveNote(ctx: SyncContext): Promise<void> {
  * 行为完全由 frontmatter 的 shimo 指向决定：
  * - 指向文件夹 → 上传 md 到该文件夹（不转换，不动原文档）
  * - 指向文档 → 转换覆盖（生成新文档、删除旧的、回写 frontmatter）
+ *
+ * 两条路径都会先上传本地图片，把链接写进正文，再上传/转换。
  */
 export async function syncNote(ctx: SyncContext, file: TFile): Promise<void> {
   const log = new SyncLogger();
@@ -128,20 +130,12 @@ async function syncAsConvert(
   }
   log.step("转换覆盖", { folderGuid, oldGuid });
 
-  // 附件以旧文档为宿主上传（新 guid 尚未生成），随后随旧文档一起失效
-  const processed = await processAttachments({
-    app: ctx.app,
-    sourceFile: file,
-    markdown: body,
-    client,
-    assetMap: new AssetMapStore(ctx.assetMap),
-    enabled: meta.syncAttachments,
-    documentGuid: oldGuid,
-  });
-  log.step("附件处理完成", {
-    uploaded: processed.uploaded,
-    reused: processed.reused,
-    skipped: processed.skipped,
+  // 用父文件夹 guid 申请图片 token：公开 CDN 链接不随旧文档删除而失效
+  const processed = await prepareBodyWithAttachments(ctx, log, client, {
+    file,
+    body,
+    meta,
+    hostGuid: folderGuid,
   });
 
   const created = await client.uploadMarkdownDocument(processed.markdown, {
@@ -162,7 +156,6 @@ async function syncAsConvert(
     });
   }
 
-  // 无论删除是否成功都回写，避免下次仍指向被替换掉的旧地址
   await updateFrontmatterShimoUrl(ctx.app, file, created.url);
   log.step("已回写 frontmatter", { shimo: created.url, deletedOld });
 
@@ -171,12 +164,11 @@ async function syncAsConvert(
     `已转换为石墨文档「${created.name}」` +
       (deletedOld ? `，旧文档已删除` : `（旧文档 ${oldType || "原文档"} 删除失败，请手动清理）`) +
       `；frontmatter 已更新` +
-      `；附件上传 ${processed.uploaded}，复用 ${processed.reused}` +
-      (processed.skipped.length ? `，跳过 ${processed.skipped.length}` : ""),
+      `；${formatAssetNotice(processed)}`,
   );
 }
 
-/** 目标是指向文件夹：只把 md 传进去，不转换、不动原文档、不改 frontmatter */
+/** 目标是指向文件夹：上传 md（含已改写的远程图片链接） */
 async function syncToFolder(
   ctx: SyncContext,
   log: SyncLogger,
@@ -188,12 +180,14 @@ async function syncToFolder(
 
   log.step("上传到文件夹", { folderGuid, folderName, title });
 
-  // 没有「目标文档」可做附件宿主，这里跳过附件处理
-  if (meta.syncAttachments) {
-    log.step("附件跳过", { reason: "目标为文件夹，需先确定文档 guid 才能上传附件" });
-  }
+  const processed = await prepareBodyWithAttachments(ctx, log, client, {
+    file,
+    body,
+    meta,
+    hostGuid: folderGuid,
+  });
 
-  const created = await client.uploadMarkdownFile(body, {
+  const created = await client.uploadMarkdownFile(processed.markdown, {
     filename: `${title}.md`,
     folderGuid,
   });
@@ -201,8 +195,53 @@ async function syncToFolder(
 
   notice.hide();
   new Notice(
-    `已上传「${created.name}」到文件夹「${folderName || folderGuid}」` +
-      (meta.syncAttachments ? `；附件未处理（文件夹模式）` : ""),
+    `已上传「${created.name}」到文件夹「${folderName || folderGuid}」；${formatAssetNotice(processed)}`,
+  );
+}
+
+/** 先上传本地图 → 改写正文链接 → 返回可上传的 markdown */
+async function prepareBodyWithAttachments(
+  ctx: SyncContext,
+  log: SyncLogger,
+  client: ShimoClient,
+  options: {
+    file: TFile;
+    body: string;
+    meta: NoteShimoMeta;
+    hostGuid: string;
+  },
+): Promise<AssetProcessResult> {
+  const { file, body, meta, hostGuid } = options;
+  log.step("处理附件", {
+    hostGuid,
+    enabled: meta.syncAttachments,
+    excalidraw: excalidrawStatusNote(),
+  });
+
+  const processed = await processAttachments({
+    app: ctx.app,
+    sourceFile: file,
+    markdown: body,
+    client,
+    assetMap: new AssetMapStore(ctx.assetMap),
+    enabled: meta.syncAttachments,
+    hostGuid,
+  });
+
+  log.step("附件处理完成", {
+    uploaded: processed.uploaded,
+    reused: processed.reused,
+    skipped: processed.skipped,
+    remoteUrls: processed.remoteUrls,
+  });
+
+  return processed;
+}
+
+function formatAssetNotice(processed: AssetProcessResult): string {
+  return (
+    `附件上传 ${processed.uploaded}，复用 ${processed.reused}` +
+    (processed.skipped.length ? `，跳过 ${processed.skipped.length}` : "")
   );
 }
 

@@ -127,10 +127,21 @@ src/
 1. `POST https://uploader.shimo.im/token?isAWSDirect=true`（bucket=`images`）
 2. multipart 上传 OBS → 公开地址 `uploader.shimo.im/f/...`
 
+## 附件流程
+
+上传 / 转换前统一：
+
+1. 扫描正文 `![[…]]` / `![](…)` 本地图片与 Excalidraw 嵌入
+2. **Excalidraw**：优先用 `ExcalidrawAutomate` 渲成 PNG；失败再找同目录 `.light.svg` / `.svg` / `.png`
+3. 按内容哈希复用，或上传到 `uploader.shimo.im` images 桶（token 绑文件夹 guid）
+4. 改写成 `![](https://uploader.shimo.im/f/…)` 后再上传 md / editImport
+
+需已启用 [Excalidraw](https://github.com/zsviczian/obsidian-excalidraw-plugin) 插件才能主动渲染；否则只能吃到已导出的预览图。
+
 ## 已知限制
 
-- 转换覆盖时附件以旧 guid 为宿主，旧文档删除后图片链接会失效
-- 文件夹模式不处理附件、同名不覆盖（会堆副本）
+- 文件夹模式同名不覆盖，重复上传会堆出多个同名 md
+- 非图片附件暂不支持（个人版仅 images 桶）
 - 个人版接口可能随官网变更
 
 ## 开发状态

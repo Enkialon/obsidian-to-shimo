@@ -12,19 +12,26 @@ export interface UploadTokenItem {
 }
 
 export function resolveUploadHost(token: UploadTokenItem): string | null {
-  const direct =
-    (typeof token.server === "string" && token.server) ||
-    (typeof token.host === "string" && token.host) ||
-    "";
-  if (direct) return direct;
-
-  for (const key of ["uploadUrl", "upload_url", "action", "endpoint"]) {
+  // 网页实际字段是 serverUrl；旧抓包偶发 server / host
+  for (const key of ["serverUrl", "server", "host", "uploadUrl", "upload_url", "action", "endpoint"]) {
     const v = token[key];
-    if (typeof v === "string" && /^https?:\/\//.test(v) && !v.includes("uploader.shimo.im/f/")) {
+    if (typeof v === "string" && /^https?:\/\//.test(v) && isObsUploadEndpoint(v)) {
       return v;
     }
   }
   return null;
+}
+
+/** OBS 直传地址；排除 uploader.shimo.im/f/ 这类公开下载 URL */
+function isObsUploadEndpoint(url: string): boolean {
+  if (url.includes("uploader.shimo.im/f/")) return false;
+  return (
+    url.includes(".obs.") ||
+    url.includes("aliyuncs.com") ||
+    url.includes("myhuaweicloud.com") ||
+    url.includes("amazonaws.com") ||
+    /\/(upload|put)\b/i.test(url)
+  );
 }
 
 export function resolveFormFields(token: UploadTokenItem): Record<string, string> {
@@ -76,7 +83,12 @@ export function resolvePublicUrl(
   formFields: Record<string, string>,
   filename: string,
 ): string | null {
-  const direct = pickString(token as Record<string, unknown>, ["url", "fileUrl", "downloadUrl"]);
+  const direct = pickString(token as Record<string, unknown>, [
+    "url",
+    "images",
+    "fileUrl",
+    "downloadUrl",
+  ]);
   if (direct && direct.includes("uploader.shimo.im")) return stripThumbnail(direct);
 
   const cb = formFields.callbackBody;

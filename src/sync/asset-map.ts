@@ -33,7 +33,9 @@ export async function sha256Hex(data: ArrayBuffer | ArrayBufferView): Promise<st
 function toDigestSource(data: ArrayBuffer | ArrayBufferView): ArrayBuffer {
   if (data instanceof ArrayBuffer) return data;
   if (ArrayBuffer.isView(data)) {
-    return data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
+    const copy = new Uint8Array(data.byteLength);
+    copy.set(new Uint8Array(data.buffer, data.byteOffset, data.byteLength));
+    return copy.buffer as ArrayBuffer;
   }
   throw new Error(
     `sha256Hex 需要 ArrayBuffer，实际是 ${Object.prototype.toString.call(data)}`,

@@ -148,7 +148,9 @@ export async function coerceToArrayBuffer(data: unknown): Promise<ArrayBuffer> {
   }
   if (ArrayBuffer.isView(data)) {
     const view = data as ArrayBufferView;
-    return view.buffer.slice(view.byteOffset, view.byteOffset + view.byteLength);
+    const copy = new Uint8Array(view.byteLength);
+    copy.set(new Uint8Array(view.buffer, view.byteOffset, view.byteLength));
+    return copy.buffer as ArrayBuffer;
   }
   if (typeof Blob !== "undefined" && data instanceof Blob) {
     return data.arrayBuffer();

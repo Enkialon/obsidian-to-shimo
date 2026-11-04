@@ -2,22 +2,15 @@ import { Notice, Plugin, TFile } from "obsidian";
 import { AssetMap, DEFAULT_SETTINGS, ObsidianToShimoSettings, PluginData } from "./settings";
 import { ObsidianToShimoSettingTab } from "./settings-tab";
 import { isExcalidrawPath } from "./sync/excalidraw";
-import { getActiveShimoMeta, noteHasShimoTarget, readShimoMeta } from "./sync/frontmatter";
+import { getActiveShimoMeta, readShimoMeta } from "./sync/frontmatter";
 import { canUpload, syncActiveNote, syncNote } from "./sync/sync-service";
 
 export default class ObsidianToShimoPlugin extends Plugin {
   settings: ObsidianToShimoSettings = { ...DEFAULT_SETTINGS };
   assetMap: AssetMap = {};
 
-  private ribbonEl: HTMLElement | null = null;
-
   async onload(): Promise<void> {
     await this.loadPluginData();
-
-    this.ribbonEl = this.addRibbonIcon("upload", "上传到石墨", async () => {
-      await this.tryUpload();
-    });
-    this.refreshRibbonState();
 
     this.addCommand({
       id: "upload-to-shimo",
@@ -27,7 +20,7 @@ export default class ObsidianToShimoPlugin extends Plugin {
       },
     });
 
-    // 文件资源管理器右键 / 标签右键，与导出插件同级入口
+    // 文件资源管理器右键 / 标签右键
     this.registerEvent(
       this.app.workspace.on("file-menu", (menu, file) => {
         if (!(file instanceof TFile) || file.extension !== "md") return;
@@ -59,24 +52,6 @@ export default class ObsidianToShimoPlugin extends Plugin {
     );
 
     this.addSettingTab(new ObsidianToShimoSettingTab(this.app, this));
-
-    this.registerEvent(
-      this.app.workspace.on("file-open", (file) => {
-        this.refreshRibbonState(file);
-      }),
-    );
-    this.registerEvent(
-      this.app.metadataCache.on("changed", (file) => {
-        const active = this.app.workspace.getActiveFile();
-        if (active && file.path === active.path) {
-          this.refreshRibbonState(active);
-        }
-      }),
-    );
-  }
-
-  onunload(): void {
-    this.ribbonEl = null;
   }
 
   private async tryUpload(): Promise<void> {
@@ -126,19 +101,6 @@ export default class ObsidianToShimoPlugin extends Plugin {
     };
   }
 
-  private refreshRibbonState(file?: TFile | null): void {
-    if (!this.ribbonEl) return;
-    const target = file ?? this.app.workspace.getActiveFile();
-    const enabled = noteHasShimoTarget(this.app, target) && !!this.settings.shimoSid.trim();
-    this.ribbonEl.style.opacity = enabled ? "1" : "0.55";
-    this.ribbonEl.style.display = "";
-    this.ribbonEl.removeAttribute("aria-disabled");
-    this.ribbonEl.setAttribute(
-      "aria-label",
-      enabled ? "上传到石墨" : "上传到石墨（需配置 shimo_sid 与笔记 shimo 地址）",
-    );
-  }
-
   async loadPluginData(): Promise<void> {
     const data = (await this.loadData()) as Partial<PluginData> | null;
     this.settings = { ...DEFAULT_SETTINGS, ...(data?.settings ?? {}) };
@@ -151,6 +113,5 @@ export default class ObsidianToShimoPlugin extends Plugin {
       assetMap: this.assetMap,
     };
     await this.saveData(payload);
-    this.refreshRibbonState();
   }
 }

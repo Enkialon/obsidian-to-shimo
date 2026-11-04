@@ -68,7 +68,6 @@ shimo_sync_attachments: true
 
 入口（任选）：
 
-- 左侧功能区上传图标
 - 命令面板「上传到石墨」
 - 文件右键 / 编辑器右键 →「上传到石墨」
 
@@ -92,7 +91,7 @@ shimo_sync_attachments: true
 
 ```
 src/
-  main.ts                 # 入口、命令、功能区
+  main.ts                 # 入口、命令、右键菜单
   settings.ts             # 设置与 assetMap 类型
   settings-tab.ts         # 设置页
   shimo/

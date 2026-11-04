@@ -1,0 +1,10 @@
+{
+  "id": "obsidian-to-shimo",
+  "name": "Obsidian to Shimo",
+  "version": "0.1.0",
+  "minAppVersion": "1.5.0",
+  "description": "将 Obsidian 笔记按 frontmatter 中的石墨地址一键覆盖同步，附件未变更时复用远程资源。",
+  "author": "obsidia-to-shimo",
+  "authorUrl": "",
+  "isDesktopOnly": true
+}

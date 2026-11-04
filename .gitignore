@@ -1,0 +1,10 @@
+node_modules/
+main.js
+main.js.map
+data.json
+.DS_Store
+*.log
+.obsidian/
+.cursor/
+.tmp*
+.tmp-cdn/

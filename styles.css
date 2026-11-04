@@ -1,0 +1,23 @@
+.ots-settings .ots-status {
+  margin-top: 0.5em;
+  opacity: 0.85;
+}
+
+.ots-settings .ots-token-input textarea,
+.ots-settings textarea.ots-token-input {
+  width: 100%;
+  min-height: 4.5em;
+  font-family: var(--font-monospace);
+  font-size: 0.85em;
+}
+
+.ots-settings textarea.ots-token-input {
+  min-height: 12em;
+}
+
+.ots-settings .ots-hint {
+  color: var(--text-muted);
+  font-size: 0.85em;
+  line-height: 1.45;
+  margin-top: 0.35em;
+}

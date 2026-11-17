@@ -3,8 +3,14 @@ import { ShimoApiError, ShimoClient, parseShimoGuid } from "../shimo";
 import { AssetMapStore } from "./asset-map";
 import { AssetProcessResult, excalidrawStatusNote, processAttachments } from "./asset-processor";
 import { NoteShimoMeta, readShimoMeta } from "./frontmatter";
+import { rewriteLinkedNotes } from "./note-link-rewriter";
 import { AssetMap, ObsidianToShimoSettings } from "../settings";
 import { SyncLogger } from "./logger";
+
+interface PrepareBodyResult extends AssetProcessResult {
+  linksRewritten: number;
+  linksSkipped: string[];
+}
 
 export interface SyncContext {
   app: App;
@@ -28,7 +34,7 @@ export async function syncActiveNote(ctx: SyncContext): Promise<void> {
  * - 指向文件夹 → 上传并转换为石墨原生文档，回写 frontmatter 到新文档
  * - 指向文档 → 转换覆盖（生成新文档、删除旧的、回写 frontmatter）
  *
- * 两条路径都会先上传本地图片，把链接写进正文，再转换。
+ * 两条路径都会先上传本地图片、改写已同步笔记互链，再转换。
  */
 export async function syncNote(ctx: SyncContext, file: TFile): Promise<void> {
   const log = new SyncLogger();
@@ -206,7 +212,7 @@ async function syncToFolder(
   );
 }
 
-/** 先上传本地图 → 改写正文链接 → 返回可上传的 markdown */
+/** 先上传本地图 → 改写正文图片链接 → 再改写已同步笔记互链 → 返回可上传的 markdown */
 async function prepareBodyWithAttachments(
   ctx: SyncContext,
   log: SyncLogger,
@@ -217,7 +223,7 @@ async function prepareBodyWithAttachments(
     meta: NoteShimoMeta;
     hostGuid: string;
   },
-): Promise<AssetProcessResult> {
+): Promise<PrepareBodyResult> {
   const { file, body, meta, hostGuid } = options;
   log.step("处理附件", {
     hostGuid,
@@ -242,13 +248,34 @@ async function prepareBodyWithAttachments(
     remoteUrls: processed.remoteUrls,
   });
 
-  return processed;
+  const links = rewriteLinkedNotes({
+    app: ctx.app,
+    sourceFile: file,
+    markdown: processed.markdown,
+  });
+  log.step("互链改写完成", {
+    rewritten: links.rewritten,
+    skipped: links.skipped,
+  });
+
+  return {
+    ...processed,
+    markdown: links.markdown,
+    linksRewritten: links.rewritten,
+    linksSkipped: links.skipped,
+  };
 }
 
-function formatAssetNotice(processed: AssetProcessResult): string {
+function formatAssetNotice(processed: PrepareBodyResult): string {
   return (
     `附件上传 ${processed.uploaded}，复用 ${processed.reused}` +
-    (processed.skipped.length ? `，跳过 ${processed.skipped.length}` : "")
+    (processed.skipped.length ? `，跳过 ${processed.skipped.length}` : "") +
+    (processed.linksRewritten
+      ? `；互链改写 ${processed.linksRewritten}`
+      : "") +
+    (processed.linksSkipped.length
+      ? `，互链跳过 ${processed.linksSkipped.length}`
+      : "")
   );
 }
 

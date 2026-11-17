@@ -47,3 +47,27 @@ export function parseShimoGuid(input: string): string | null {
   return null;
 }
 
+/** 石墨 URL 是否指向文件夹（本地启发式，不请求接口） */
+export function isShimoFolderUrl(input: string): boolean {
+  const raw = (input || "").trim();
+  if (!raw) return false;
+  try {
+    const url = new URL(raw);
+    const parts = url.pathname.split("/").filter(Boolean);
+    return parts.some((p) => {
+      const lower = p.toLowerCase();
+      return lower === "folder" || lower === "folders";
+    });
+  } catch {
+    return /\/folders?\//i.test(raw);
+  }
+}
+
+/** 是否可作为互链目标的文档级石墨地址 */
+export function isShimoDocumentUrl(input: string): boolean {
+  const raw = (input || "").trim();
+  if (!raw) return false;
+  if (isShimoFolderUrl(raw)) return false;
+  return !!parseShimoGuid(raw);
+}
+

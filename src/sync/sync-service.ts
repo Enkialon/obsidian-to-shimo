@@ -1,10 +1,12 @@
 import { App, Notice, TFile } from "obsidian";
 import { ShimoApiError, ShimoClient, parseShimoGuid } from "../shimo";
+import { buildReplacementOps, NativeDocument, nativeSignature, nativeText } from "../shimo/native-doc";
 import { AssetMapStore } from "./asset-map";
 import { AssetProcessResult, excalidrawStatusNote, processAttachments } from "./asset-processor";
 import { NoteShimoMeta, readShimoMeta } from "./frontmatter";
 import { rewriteLinkedNotes } from "./note-link-rewriter";
 import { AssetMap, ObsidianToShimoSettings } from "../settings";
+import { sleep } from "../shimo/util";
 import { SyncLogger } from "./logger";
 
 interface PrepareBodyResult extends AssetProcessResult {
@@ -18,6 +20,8 @@ export interface SyncContext {
   assetMap: AssetMap;
   persistAssetMap: () => Promise<void>;
   saveSyncLog: (log: string) => Promise<void>;
+  /** 把覆盖前的正文备份到插件目录，返回可展示的路径 */
+  writeBackup: (name: string, data: string) => Promise<string>;
 }
 
 export async function syncActiveNote(ctx: SyncContext): Promise<void> {
@@ -119,8 +123,247 @@ interface SyncJobBase {
   meta: NoteShimoMeta;
 }
 
-/** 目标是指向文档：转换覆盖（新文档生成后删除旧的，并把 frontmatter 指向新地址） */
+/** 目标是指向文档：默认原地覆盖（GUID / 链接不变），可切换旧版「新建 + 删旧」 */
 async function syncAsConvert(
+  ctx: SyncContext,
+  log: SyncLogger,
+  notice: Notice,
+  client: ShimoClient,
+  job: SyncJobBase & { oldGuid: string; oldType: string },
+): Promise<void> {
+  if (ctx.settings.overwriteMode === "legacy") {
+    await syncAsLegacyConvert(ctx, log, notice, client, job);
+    return;
+  }
+  await syncAsOverwrite(ctx, log, notice, client, job);
+}
+
+/**
+ * 原地覆盖（GUID 与访问链接不变）。
+ *
+ * 1. Markdown → 临时原生文档（复用 editImport）
+ * 2. 读临时文档原生 ops；读目标文档原生 ops + rev
+ * 3. 把目标正文备份到插件目录
+ * 4. compose 提交「删除目标全文 + 插入临时文档全部 ops」
+ * 5. 校验服务端内容；不一致则自动回滚
+ * 6. 删除临时文档
+ *
+ * 只改目标文档正文，不碰 frontmatter（URL 不变）。
+ */
+async function syncAsOverwrite(
+  ctx: SyncContext,
+  log: SyncLogger,
+  notice: Notice,
+  client: ShimoClient,
+  job: SyncJobBase & { oldGuid: string; oldType: string },
+): Promise<void> {
+  const { file, body, title, meta, oldGuid, oldType } = job;
+
+  if (oldType && oldType !== "newdoc") {
+    throw new ShimoApiError(
+      `目标文档类型为 ${oldType}，不是轻文档（newdoc），暂不支持原地覆盖；` +
+        `可在设置里改用旧版「新建 + 删旧」模式`,
+      400,
+      "",
+    );
+  }
+
+  const folderGuid = await client.getParentFolderGuid(oldGuid);
+  if (!folderGuid) {
+    throw new ShimoApiError("无法确定目标文档所在文件夹，无法生成临时文档", 400, "");
+  }
+  log.step("原地覆盖准备", { folderGuid, oldGuid });
+
+  // 用父文件夹 guid 申请图片 token：公开 CDN 链接不随临时文档删除而失效
+  const processed = await prepareBodyWithAttachments(ctx, log, client, {
+    file,
+    body,
+    meta,
+    hostGuid: folderGuid,
+  });
+
+  const target = await client.readNativeDocument(oldGuid);
+  if (target.head <= 0 || target.ops.length === 0) {
+    throw new ShimoApiError("读取目标文档正文失败（内容为空或版本号为 0），已中止，未做修改", 200, "");
+  }
+  log.step("读取目标正文", {
+    head: target.head,
+    length: target.length,
+    ops: target.ops.length,
+  });
+
+  const temp = await client.uploadMarkdownDocument(processed.markdown, {
+    filename: `${title}.md`,
+    folderGuid,
+  });
+  log.step("已生成临时文档", temp);
+
+  let deleted = false;
+  try {
+    const fresh = await waitForImportedDocument(client, temp.guid);
+    const expected = nativeSignature(fresh.ops);
+    if (!expected) {
+      throw new ShimoApiError("临时文档正文为空，转换可能失败", 200, "");
+    }
+
+    const changeset = buildReplacementOps(target.ops, fresh.ops);
+    log.step("构造覆盖 changeset", {
+      rev: target.head,
+      removeLength: target.length,
+      insertOps: changeset.length - 1,
+      tempHead: fresh.head,
+    });
+
+    const backupPayload = JSON.stringify(
+      {
+        guid: oldGuid,
+        name: target.name,
+        head: target.head,
+        savedAt: new Date().toISOString(),
+        ops: target.ops,
+      },
+      null,
+      2,
+    );
+    let backupPath = "";
+    try {
+      backupPath = await ctx.writeBackup(`${oldGuid}-${backupStamp()}.json`, backupPayload);
+    } catch (err) {
+      throw new ShimoApiError(
+        `无法写入本地备份，已中止（石墨文档未被修改）：${err instanceof Error ? err.message : String(err)}`,
+        400,
+        "",
+      );
+    }
+    log.step("已备份目标正文", { path: backupPath, head: target.head });
+
+    try {
+      await client.composeDocument(oldGuid, target.head, changeset);
+      log.step("已提交覆盖", { rev: target.head });
+
+      const applied = await waitForSignature(client, oldGuid, expected, target.head);
+      if (!applied.matched) {
+        throw new ShimoApiError(
+          "覆盖后校验失败：服务端内容与预期不一致",
+          200,
+          nativeText(applied.doc.ops).slice(0, 300),
+        );
+      }
+      log.step("覆盖校验通过", { head: applied.doc.head, length: applied.doc.length });
+    } catch (err) {
+      let restoreState: "already" | "restored" | "failed" = "failed";
+      try {
+        restoreState = await restoreDocument(client, log, oldGuid, target, backupPath);
+      } catch (restoreErr) {
+        log.error("自动回滚失败", {
+          backupPath,
+          error: restoreErr instanceof Error ? restoreErr.message : String(restoreErr),
+        });
+      }
+      if (restoreState === "restored") {
+        log.step("已回滚到覆盖前内容", { head: target.head });
+      }
+      const reason = err instanceof Error ? err.message : String(err);
+      const suffix =
+        restoreState === "restored"
+          ? "（已自动回滚）"
+          : restoreState === "failed"
+            ? "（自动回滚失败，请用备份恢复）"
+            : "";
+      throw new ShimoApiError(
+        `${reason}${suffix}；备份：${backupPath}`,
+        err instanceof ShimoApiError ? err.status : 200,
+        err instanceof ShimoApiError ? err.body : "",
+      );
+    }
+
+    notice.hide();
+    new Notice(
+      `已原地覆盖石墨文档「${target.name || title}」，链接与 GUID 不变` +
+        `；${formatAssetNotice(processed)}`,
+    );
+  } finally {
+    try {
+      await client.deleteFile(temp.guid);
+      deleted = true;
+    } catch (err) {
+      log.step("临时文档清理失败", {
+        tempGuid: temp.guid,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+    log.step("临时文档清理", { tempGuid: temp.guid, deleted });
+  }
+}
+
+/** 只有当前内容与备份不一致时才回滚，避免覆盖根本没生效时重复提交 */
+async function restoreDocument(
+  client: ShimoClient,
+  log: SyncLogger,
+  guid: string,
+  backup: NativeDocument,
+  backupPath: string,
+): Promise<"already" | "restored"> {
+  const current = await client.readNativeDocument(guid);
+  const backupSignature = nativeSignature(backup.ops);
+  if (nativeSignature(current.ops) === backupSignature) return "already";
+
+  log.step("开始回滚", { rev: current.head, currentLength: current.length, backupLength: backup.length });
+  const undo = buildReplacementOps(current.ops, backup.ops);
+  await client.composeDocument(guid, current.head, undo);
+
+  const restored = await waitForSignature(client, guid, backupSignature, current.head);
+  if (!restored.matched) {
+    throw new ShimoApiError(`回滚未生效，请用备份手动恢复：${backupPath}`, 200, "");
+  }
+  return "restored";
+}
+
+/** 转换完成后正文可能稍晚落盘，这里等到有内容为止 */
+async function waitForImportedDocument(
+  client: ShimoClient,
+  guid: string,
+  timeoutMs = 60_000,
+): Promise<NativeDocument> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const doc = await client.readNativeDocument(guid);
+      if (doc.ops.length > 0) return doc;
+    } catch {
+      // 内容还没写好时可能 404 / 空对象，继续等
+    }
+    await sleep(1500);
+  }
+  throw new ShimoApiError("临时文档迟迟没有内容，转换可能失败", 200, "");
+}
+
+/** 轮询到 head 前进且内容指纹匹配（服务端对过期 rev 不报错，只能自己校验） */
+async function waitForSignature(
+  client: ShimoClient,
+  guid: string,
+  expected: string,
+  minHead: number,
+  timeoutMs = 20_000,
+): Promise<{ doc: NativeDocument; matched: boolean }> {
+  const deadline = Date.now() + timeoutMs;
+  let doc = await client.readNativeDocument(guid);
+  while (Date.now() < deadline) {
+    if (doc.head > minHead && nativeSignature(doc.ops) === expected) {
+      return { doc, matched: true };
+    }
+    await sleep(1500);
+    doc = await client.readNativeDocument(guid);
+  }
+  return { doc, matched: doc.head > minHead && nativeSignature(doc.ops) === expected };
+}
+
+function backupStamp(): string {
+  return new Date().toISOString().replace(/[:.]/g, "-");
+}
+
+/** 旧版转换覆盖：新文档生成后删除旧的，并把 frontmatter 指向新地址（GUID 会变） */
+async function syncAsLegacyConvert(
   ctx: SyncContext,
   log: SyncLogger,
   notice: Notice,

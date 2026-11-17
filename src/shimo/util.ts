@@ -5,6 +5,26 @@ export function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/** 只取 host 用于错误信息，避免把签名参数打进日志 */
+export function safeHost(url: string): string {
+  try {
+    return new URL(url).host;
+  } catch {
+    return "contentUrl";
+  }
+}
+
+const ALNUM = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+
+/** 生成指定长度的字母数字串（石墨的 uuid / clientId 形态） */
+export function randomAlnum(length: number): string {
+  let out = "";
+  for (let i = 0; i < length; i++) {
+    out += ALNUM[Math.floor(Math.random() * ALNUM.length)];
+  }
+  return out;
+}
+
 /** 石墨对上传文件名敏感：必须带 .md 扩展名，否则不会走 markdown 转换 */
 export function normalizeMarkdownFilename(name: string): string {
   const trimmed = (name || "").trim() || "未命名";

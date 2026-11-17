@@ -3,11 +3,18 @@ import { describeHttpError, ShimoApiError } from "./errors";
 import {
   API_BASE,
   APP_ORIGIN,
+  EDIT_BASE,
   PANDA_BASE,
   ShimoHttp,
   UPLOADER_TOKEN_URL,
 } from "./http";
 import { buildMultipart, MultipartPart } from "./multipart";
+import {
+  deltaLength,
+  NativeDocument,
+  NativeOp,
+  parseNativeContent,
+} from "./native-doc";
 import { ShimoFileInfo, ShimoUploadResult, ShimoUser } from "./types";
 import {
   resolveFormFields,
@@ -21,7 +28,9 @@ import {
   extractGuidFromBody,
   isImageMimeOrName,
   normalizeMarkdownFilename,
+  randomAlnum,
   resolveDocUrl,
+  safeHost,
   sleep,
   stripMarkdownExt,
   uint8ToArrayBuffer,
@@ -336,6 +345,152 @@ export class ShimoClient {
     const info = await this.getFile(cloudGuid);
     const name = typeof info.name === "string" ? info.name : stripMarkdownExt(options.filename);
     return { guid: cloudGuid, name, url: resolveDocUrl(info, cloudGuid) };
+  }
+
+  /**
+   * 读取轻文档的完整原生内容（打包 Delta + 当前 rev）。
+   *
+   * 优先走 GET /lizard-api/files/{guid}/content：和网页同源，直接返回整篇 Delta，
+   * 响应头 x-shimo-head / x-shimo-content-length 给出 rev 与字符数。
+   * 该接口不可用时退回 /files/{guid}?contentUrl=true 的 OBS 签名地址
+   * （部分公司的网络策略/安全软件会拦 OBS 域名，报 ERR_BLOCKED_BY_CLIENT）。
+   *
+   * 返回的 ops 是整篇文档快照（全部为插入 op），可直接作为覆盖用的新内容。
+   */
+  async readNativeDocument(guid: string): Promise<NativeDocument> {
+    const viaApi = await this.readNativeViaApi(guid);
+    if (viaApi) return viaApi;
+    return this.readNativeViaContentUrl(guid);
+  }
+
+  /** shimo.im 同源的内容接口；失败返回 null 由调用方兜底 */
+  private async readNativeViaApi(guid: string): Promise<NativeDocument | null> {
+    let res;
+    try {
+      res = await this.http.requestRaw(`${API_BASE}/files/${encodeURIComponent(guid)}/content`, {
+        Accept: "application/nd.shimo.v2+json, text/plain, */*",
+        Referer: `${APP_ORIGIN}/docs/${guid}`,
+      });
+    } catch {
+      return null;
+    }
+    if (res.status < 200 || res.status >= 300) return null;
+
+    const declared = Number(
+      res.headers["x-shimo-content-length"] ?? res.headers["x-amz-meta-length"],
+    );
+    const text = Number.isFinite(declared) && declared > 0 ? res.text.slice(0, declared) : res.text;
+
+    let ops: NativeOp[];
+    try {
+      ops = parseNativeContent(text);
+    } catch {
+      return null;
+    }
+    if (ops.length === 0) return null;
+
+    return {
+      guid,
+      head: await this.resolveHead(guid, res.headers),
+      length: deltaLength(ops),
+      ops,
+      raw: text,
+    };
+  }
+
+  private async resolveHead(guid: string, headers: Record<string, string>): Promise<number> {
+    const fromHeader = Number(headers["x-shimo-head"] ?? headers["x-amz-meta-head"]);
+    if (Number.isFinite(fromHeader) && fromHeader > 0) return fromHeader;
+
+    try {
+      const res = await this.http.request<{ head?: number }>(
+        `${EDIT_BASE}/files/${encodeURIComponent(guid)}/head`,
+        {
+          headers: {
+            Accept: "application/json",
+            Referer: `${APP_ORIGIN}/docs/${guid}`,
+          },
+        },
+      );
+      const head = Number(res?.head);
+      return Number.isFinite(head) ? head : 0;
+    } catch {
+      return 0;
+    }
+  }
+
+  /** 兜底：文件元信息里的 contentUrl（OBS 签名 URL） */
+  private async readNativeViaContentUrl(guid: string): Promise<NativeDocument> {
+    const info = await this.getFile(guid);
+    const contentUrl = typeof info.contentUrl === "string" ? info.contentUrl : "";
+    if (!contentUrl) {
+      throw new ShimoApiError(
+        `无法读取原生内容：文档 ${guid} 没有 contentUrl（可能不是轻文档）`,
+        200,
+        JSON.stringify(info).slice(0, 300),
+      );
+    }
+
+    let res;
+    try {
+      res = await this.http.requestRaw(contentUrl, {
+        Accept: "application/nd.shimo.v2+json, text/plain, */*",
+        Referer: `${APP_ORIGIN}/docs/${guid}`,
+      });
+    } catch (err) {
+      const host = safeHost(contentUrl);
+      throw new ShimoApiError(
+        `读取文档正文失败（${host}）：${err instanceof Error ? err.message : String(err)}。` +
+          `若提示 ERR_BLOCKED_BY_CLIENT，通常是本机网络策略/安全软件拦截了 OBS 域名`,
+        0,
+        "",
+      );
+    }
+    if (res.status < 200 || res.status >= 300) {
+      throw new ShimoApiError(
+        describeHttpError(res.status, res.text),
+        res.status,
+        res.text.slice(0, 300),
+      );
+    }
+
+    const declaredLength = Number(res.headers["x-amz-meta-length"]);
+    const text =
+      Number.isFinite(declaredLength) && declaredLength > 0
+        ? res.text.slice(0, declaredLength)
+        : res.text;
+    const ops = parseNativeContent(text);
+    const head = Number(res.headers["x-amz-meta-head"]);
+
+    return {
+      guid,
+      head: Number.isFinite(head) ? head : 0,
+      length: deltaLength(ops),
+      ops,
+      name: typeof info.name === "string" ? info.name : undefined,
+      raw: text,
+    };
+  }
+
+  /**
+   * 提交原生 changeset。rev 必须等于 readNativeDocument 返回的 head。
+   * 服务端对过期 rev 不一定报错，所以调用方必须自行校验落盘结果。
+   */
+  async composeDocument(guid: string, rev: number, ops: NativeOp[]): Promise<unknown> {
+    return this.http.request(`${EDIT_BASE}/files/${encodeURIComponent(guid)}/compose`, {
+      method: "POST",
+      body: JSON.stringify({
+        rev,
+        changeset: JSON.stringify(ops),
+        uuid: randomAlnum(32),
+        clientId: `${randomAlnum(17)}_obsidian-sync`,
+      }),
+      contentType: "application/json",
+      headers: {
+        Accept: "application/json, text/plain, */*",
+        Referer: `${APP_ORIGIN}/docs/${guid}`,
+      },
+    });
   }
 
   /**

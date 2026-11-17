@@ -82,8 +82,24 @@ export class ObsidianToShimoSettingTab extends PluginSettingTab {
       text:
         "无需配置方式：看笔记 frontmatter 的 shimo 指向哪。" +
         "指向文件夹（https://shimo.im/folder/xxx）→ 上传并转换为石墨原生文档，回写 shimo 到新文档；" +
-        "指向文档（https://shimo.im/docs/xxx）→ 转换覆盖：生成新文档、删除旧的、回写 shimo。",
+        "指向文档（https://shimo.im/docs/xxx）→ 原地覆盖正文，GUID 与链接保持不变。",
     });
+
+    new Setting(containerEl)
+      .setName("已有文档的覆盖方式")
+      .setDesc(
+        "原地覆盖：读取转换后的原生内容，按 /compose 提交完整替换，链接不变；" +
+          "旧版：新建文档后删除旧文档，frontmatter 会改写成新地址。",
+      )
+      .addDropdown((dd) => {
+        dd.addOption("inplace", "原地覆盖（推荐）");
+        dd.addOption("legacy", "旧版：新建 + 删旧");
+        dd.setValue(this.plugin.settings.overwriteMode);
+        dd.onChange(async (value) => {
+          this.plugin.settings.overwriteMode = value === "legacy" ? "legacy" : "inplace";
+          await this.plugin.savePluginData();
+        });
+      });
 
     containerEl.createEl("h3", { text: "如何获取 shimo_sid" });
     const ol = containerEl.createEl("ol", { cls: "ots-hint" });

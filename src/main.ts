@@ -98,7 +98,20 @@ export default class ObsidianToShimoPlugin extends Plugin {
         this.settings.lastSyncLog = log;
         await this.savePluginData();
       },
+      writeBackup: async (name: string, data: string) => this.writeBackup(name, data),
     };
+  }
+
+  /** 覆盖前的正文备份写到插件目录 backups/，失败时可用于手动恢复 */
+  private async writeBackup(name: string, data: string): Promise<string> {
+    const adapter = this.app.vault.adapter;
+    const dir = `${this.app.vault.configDir}/plugins/${this.manifest.id}/backups`;
+    if (!(await adapter.exists(dir))) {
+      await adapter.mkdir(dir);
+    }
+    const path = `${dir}/${name}`;
+    await adapter.write(path, data);
+    return path;
   }
 
   async loadPluginData(): Promise<void> {

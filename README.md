@@ -16,7 +16,7 @@
 | 能力 | 说明 |
 |------|------|
 | 元数据绑定 | frontmatter `shimo` 指向文档或文件夹 |
-| 自动分流 | 文件夹 → 转原生文档并回写；文档 → 转换覆盖 |
+| 自动分流 | 文件夹 → 转原生文档并回写；文档 → 原地覆盖正文（GUID / 链接不变） |
 | 附件复用 | 按内容 SHA-256 映射远程 URL |
 | 配置页鉴权 | 粘贴 `shimo_sid`，校验 `/users/me` |
 
@@ -51,7 +51,7 @@ npm run build
 shimo: https://shimo.im/folder/47kgMDvBPduxba3V
 ---
 
-# 文档 → 转换覆盖（删旧、回写新地址）
+# 文档 → 原地覆盖正文，GUID 与链接不变
 ---
 shimo: https://shimo.im/docs/xxxxxxxx
 ---
@@ -63,6 +63,11 @@ shimo: https://shimo.im/docs/xxxxxxxx
 shimo_title: 同步后的标题
 shimo_sync_attachments: true
 ```
+
+设置页还可切换「已有文档的覆盖方式」：
+
+- **原地覆盖（默认）**：`editImport` 生成临时文档 → 读原生内容 → `/compose` 覆盖原文档，链接不变
+- **旧版（新建 + 删旧）**：生成新文档、删除旧文档、回写 frontmatter（GUID 会变）
 
 ### 4. 上传
 
@@ -83,9 +88,10 @@ shimo_sync_attachments: true
 | 目标 | 判定 | 行为 |
 |------|------|------|
 | 文件夹 | `isFolder` / `url` 以 `/folder/` 开头 | 上传 → `editImport` 转原生文档 → 回写 frontmatter |
-| 文档 | 其它 | 上传 → `editImport` → 删旧文档 → 回写 frontmatter |
+| 文档 | 其它 | 上传 → `editImport` 生成临时文档 → 读原生内容 → `/compose` 原地覆盖 → 删除临时文档 |
 
-转换落在旧文档同级目录（`/panda-api/.../ancestors` 推导），并轮询 progress，最长 120 秒。
+临时文档落在目标文档同级目录（`/panda-api/.../ancestors` 推导），并轮询 progress，最长 120 秒。
+覆盖前会把目标正文备份到 `<vault>/.obsidian/plugins/obsidian-to-shimo/backups/`。
 
 ## 项目结构
 
@@ -96,7 +102,8 @@ src/
   settings-tab.ts         # 设置页
   shimo/
     index.ts              # 对外导出
-    client.ts             # 石墨 API（上传 / 转换 / 删除）
+    client.ts             # 石墨 API（上传 / 转换 / 读原生内容 / compose / 删除）
+    native-doc.ts         # 原生 Delta 解析、长度、覆盖 changeset、内容指纹
     http.ts               # Cookie 请求封装
     errors.ts             # ShimoApiError
     multipart.ts          # OBS multipart
@@ -105,7 +112,7 @@ src/
     url.ts                # 解析 guid
     types.ts
   sync/
-    sync-service.ts       # 同步主流程（文件夹 / 转换两条路径）
+    sync-service.ts       # 同步主流程（文件夹 / 原地覆盖两条路径）
     frontmatter.ts        # 读取 shimo 元数据
     asset-map.ts          # 哈希映射
     asset-processor.ts    # 附件处理
@@ -119,18 +126,40 @@ src/
 1. `POST /lizard-api/files/upload/postPolicy`（`x-file-parent-guid`）
 2. multipart 上传到 OBS
 
-**文档转换覆盖**
+**文档原地覆盖**
 
 1–2 同上，再：
 
-3. `POST /lizard-api/office-gw/files/editImport`（`type=newdoc`）
+3. `POST /lizard-api/office-gw/files/editImport`（`type=newdoc`）生成临时文档
 4. 轮询 `/editImport/progress`
-5. `DELETE /lizard-api/files/{旧guid}`，回写 `shimo`
+5. `GET /lizard-api/files/{guid}/content` 读整篇原生 Delta
+   - 响应头 `x-shimo-head` = 当前 rev，`x-shimo-content-length` = 内容字符数
+   - 兜底：`GET /files/{guid}?contentUrl=true` 返回的 OBS 签名地址（个别网络策略会拦 OBS 域名）
+6. `POST /edit/files/{目标guid}/compose`，`changeset = [[11, 旧正文长度], ...临时文档的插入 op]`
+7. 重新读取校验；失败自动回滚
+8. `DELETE /lizard-api/files/{临时guid}`
+
+旧版模式则回到「新建 → 删除旧文档 → 回写 `shimo`」。
 
 **附件**
 
 1. `POST https://uploader.shimo.im/token?isAWSDirect=true`（bucket=`images`）
 2. multipart 上传 OBS → 公开地址 `uploader.shimo.im/f/...`
+
+## 原地覆盖原理（/compose）
+
+石墨轻文档的原生正文是「打包 Delta」，可从内容接口完整读出，不需要浏览器或编辑器运行时：
+
+- 快照是纯插入序列 `[code, data, attributes]`，`code = packId * 10 + action`
+- 长度 = 文本字符数，表格 / 嵌入各算 1 个位置
+- 覆盖因此不需要重写 Markdown 转换器：临时文档的插入 op 原样复用，前面补一条「删除旧全文」
+
+安全措施：
+
+- 覆盖前把目标原生内容备份到 `backups/{guid}-{时间}.json`
+- 服务端对过期 `rev` 不一定报错，提交后必须回读校验内容指纹
+- 校验失败自动用备份回滚；回滚失败时在 Notice / 日志里给出备份路径
+- 临时文档在 `finally` 中删除，失败也不影响本地笔记
 
 ## 附件流程
 
@@ -146,8 +175,12 @@ src/
 ## 已知限制
 
 - 非图片附件暂不支持（个人版仅 images 桶）
+- 原地覆盖只支持轻文档（`type=newdoc`）；旧版文档 / 表格 / 幻灯片请用旧版模式
+- 覆盖是整篇替换：同步期间他人在石墨上的修改会被覆盖；服务端对过期 `rev` 不保证报错，靠回读校验与回滚兜底
+- 正文整体替换后，锚在旧文本上的评论会消失
+- 备份文件只做留档，恢复需手动执行（或用旧版模式重建）
 - 个人版接口可能随官网变更
 
 ## 开发状态
 
-`0.1.0`：设置页 + 门控上传 + 目标自动识别 + 附件复用。
+`0.1.0`：设置页 + 门控上传 + 目标自动识别 + 附件复用 + 文档原地覆盖（`/compose`，GUID 不变）。

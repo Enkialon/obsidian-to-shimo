@@ -1,5 +1,8 @@
 export type CredentialStatus = "empty" | "configured" | "valid" | "invalid";
 
+/** 覆盖已有文档的方式 */
+export type OverwriteMode = "inplace" | "legacy";
+
 export interface ObsidianToShimoSettings {
   /** 浏览器 Cookie 中的 shimo_sid，或完整 Cookie 字符串 */
   shimoSid: string;
@@ -11,6 +14,12 @@ export interface ObsidianToShimoSettings {
   lastVerifiedAt: string;
   /** 最近一次同步的详细日志（设置页可查看/复制） */
   lastSyncLog: string;
+  /**
+   * 指向已有文档时：
+   * - inplace：原地覆盖正文，GUID / 链接不变（默认）
+   * - legacy：新建文档 + 删除旧文档 + 回写 frontmatter（GUID 会变）
+   */
+  overwriteMode: OverwriteMode;
 }
 
 export const DEFAULT_SETTINGS: ObsidianToShimoSettings = {
@@ -19,6 +28,7 @@ export const DEFAULT_SETTINGS: ObsidianToShimoSettings = {
   accountName: "",
   lastVerifiedAt: "",
   lastSyncLog: "",
+  overwriteMode: "inplace",
 };
 
 /** 本地资源 → 石墨远程 URL 映射（按内容哈希复用，避免重复上传） */

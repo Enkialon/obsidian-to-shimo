@@ -4,7 +4,14 @@ import { describeHttpError, ShimoApiError } from "./errors";
 export const API_BASE = "https://shimo.im/lizard-api";
 export const PANDA_BASE = "https://shimo.im/panda-api";
 export const APP_ORIGIN = "https://shimo.im";
+export const EDIT_BASE = "https://shimo.im/edit";
 export const UPLOADER_TOKEN_URL = "https://uploader.shimo.im/token?isAWSDirect=true";
+
+export interface RawHttpResponse {
+  status: number;
+  headers: Record<string, string>;
+  text: string;
+}
 
 /** 带 Cookie 的石墨 HTTP 封装 */
 export class ShimoHttp {
@@ -62,5 +69,25 @@ export class ShimoHttp {
     } catch {
       return res.text as unknown as T;
     }
+  }
+
+  /**
+   * 原始 GET：需要读响应头（文档内容接口用 x-amz-meta-head / x-amz-meta-length）。
+   * 不抛错，由调用方判断状态码。
+   */
+  async requestRaw(url: string, headers?: Record<string, string>): Promise<RawHttpResponse> {
+    const res = await requestUrl({
+      url: url.startsWith("http") ? url : `${API_BASE}${url}`,
+      method: "GET",
+      headers: this.baseHeaders(headers),
+      throw: false,
+    });
+
+    const normalized: Record<string, string> = {};
+    for (const [key, value] of Object.entries(res.headers ?? {})) {
+      normalized[key.toLowerCase()] = String(value);
+    }
+
+    return { status: res.status, headers: normalized, text: res.text ?? "" };
   }
 }

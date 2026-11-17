@@ -8,3 +8,7 @@ data.json
 .cursor/
 .tmp*
 .tmp-cdn/
+research-out/
+.research-shimo-md/
+.dsh-acl-recovery/
+backups/
